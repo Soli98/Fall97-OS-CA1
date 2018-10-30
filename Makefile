@@ -1,13 +1,13 @@
 COMPILER = gcc
 
-all : Server.c Client.c
-	${COMPILER} -o Server Server.c && ${COMPILER} -o Client Client.c
+all : header.h header.c Server.c Client.c
+	${COMPILER} -o Server header.c Server.c && ${COMPILER} -o Client header.c Client.c
 
-Server : Server.c
-	${COMPILER} -o Server erver.c
+Server : header.h header.c Server.c
+	${COMPILER} -o Server header.c Server.c
 
-Client : Client.c
-	${COMPILER} -o Client Client.c
+Client : header.c header.h Client.c
+	${COMPILER} -o Client header.c Client.c
 
 clean:
 	rm *.o Server Client

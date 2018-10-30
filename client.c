@@ -1,95 +1,198 @@
-/*
-** listener.c -- a datagram sockets "server" demo
-*/
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-
-#define MAXCLIENTS 16
-#define MAXBUFLEN 100
-
-// get sockaddr, IPv4 or IPv6:
-void *get_in_addr(struct sockaddr *sa)
-{
-    if (sa->sa_family == AF_INET) {
-        return &(((struct sockaddr_in*)sa)->sin_addr);
-    }
-
-    return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
+#include "header.h"
 
 int main(int argc, char *argv[])
 {
-    int udp_listen_port = atoi(argv[1]);
-    int my_tcp_port = atoi(argv[2]);
-    int udp_listen_socket, tcp_socket;
-    struct sockaddr_in host_addr, my_tcp_addr, udp_listen_addr;
-    tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
-    int numbytes;
-    struct sockaddr_storage their_addr;
+    int myUDPListenPort = atoi(argv[2]);
+    int myTCPGamePort;
+    int myState = IDLE;
+    // char* username = argv[1];
+    int myUDPListenSocket, myTCPSocket, myTCPGameSocket, gamePlaySocket;
+    struct sockaddr_in serverTCPAddress, myTCPAddress, myUDPListenAddress, myTCPGameAddress, gamePlayAddress;
+    int bytesReceived;
+    struct sockaddr_storage theirAddr;
     char buf[MAXBUFLEN];
-    socklen_t addr_len;
-    char s[INET6_ADDRSTRLEN];
+    char message[MAXBUFLEN];
+    socklen_t addrLen;
+    bool serverIsUp = true;
+    bool loggedIn = false;
+    gamePlaySocket = socket(AF_INET, SOCK_STREAM, 0);
 
-    udp_listen_socket = socket(AF_INET, SOCK_DGRAM, 0);
-    udp_listen_addr.sin_family = AF_INET;
-    udp_listen_addr.sin_port = htons(udp_listen_port);
-    udp_listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    myUDPListenSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    myUDPListenAddress.sin_family = AF_INET;
+    myUDPListenAddress.sin_port = htons(myUDPListenPort);
+    myUDPListenAddress.sin_addr.s_addr = htonl(INADDR_ANY);
     uint32_t reuseport = 1;
-    setsockopt(udp_listen_socket, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));
+    setsockopt(myUDPListenSocket, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));
+    
+    struct timeval read_timeout;
+    read_timeout.tv_sec = 2;
+    read_timeout.tv_usec = 0;
+    setsockopt(myUDPListenSocket, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
 
-    // struct timeval tv;
-    // tv.tv_sec = 2;
-    // tv.tv_usec = 1000;
-    // if (setsockopt(udp_listen_socket, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv)) < 0) {
-    //     const char err[] ="setsockopt: timeval\n" ;
-    //     write(STDERR_FILENO, err, sizeof(err)-1);
-    // }
-
-    if (bind(udp_listen_socket, (struct sockaddr *) &udp_listen_addr, sizeof udp_listen_addr) == -1) {
-        close(udp_listen_socket);
+    if (bind(myUDPListenSocket, (struct sockaddr *) &myUDPListenAddress, sizeof myUDPListenAddress) == -1) {
+        close(myUDPListenSocket);
         perror("listener: bind");
     }
+
     struct ip_mreq mreq;
-    mreq.imr_multiaddr.s_addr = inet_addr("225.0.0.37");
+    mreq.imr_multiaddr.s_addr = inet_addr(BROADCAST_GROUP_IP);
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    
-    if (setsockopt(udp_listen_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*) &mreq, sizeof(mreq)) < 0){
+    if (setsockopt(myUDPListenSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*) &mreq, sizeof(mreq)) < 0){
         const char err[] ="setsockopt: mreq\n" ;
         write(STDERR_FILENO, err, sizeof(err)-1);
         exit(EXIT_FAILURE);
     }
-    printf("listener: waiting to receive from server...\n");
+    char username[MAXBUFLEN];
+    printByWrite("Please enter your username: ");
+    bytesReceived = read(STDIN_FILENO, username, sizeof(username));
+    username[bytesReceived - 1] = '\0';
 
-    addr_len = sizeof their_addr;
-    if ((numbytes = recvfrom(udp_listen_socket, buf, MAXBUFLEN-1 , 0,
-        (struct sockaddr *)&their_addr, &addr_len)) == -1) {
-        perror("recvfrom");
-        exit(1);
+    printByWrite("listener: waiting to receive from server...\n");
+    
+    // Setting up game port
+    myTCPGameSocket = socket(AF_INET, SOCK_STREAM, 0);
+    myTCPGameAddress.sin_family = AF_INET;
+    myTCPGameAddress.sin_port = 0;
+    myTCPGameAddress.sin_addr.s_addr = INADDR_ANY;
+    bind(myTCPGameSocket, (struct sockaddr *) &myTCPGameAddress, sizeof myTCPGameAddress);
+    listen(myTCPGameSocket, MAX_CLIENTS);
+    
+
+    // Connecting to server
+    myTCPSocket = socket(AF_INET, SOCK_STREAM, 0);
+    myTCPAddress.sin_family = AF_INET;
+    myTCPAddress.sin_port = 0;
+    myTCPAddress.sin_addr.s_addr = INADDR_ANY;
+    bind(myTCPSocket, (struct sockaddr *) &myTCPAddress, sizeof myTCPAddress);
+    struct sockaddr_in peerAddress;
+    int mode = 0;
+    for(;;) {
+        if (mode == 0) {
+            if (checkServerAvailability(myUDPListenSocket, &serverTCPAddress) == 0) {
+                serverIsUp = false;
+                printByWrite("Server is offline. You can:\n");
+                printByWrite("0: Check server availability.\n");
+                printByWrite("3: Find a random opponent.\n");
+                printByWrite("4: Find a certain opponent with username.\n");
+                printByWrite("Enter mode number: ");
+                mode = getIntInput();
+            } else {
+                serverIsUp = true;
+                if (!loggedIn) {
+                    printByWrite("Server Port Number: ");
+                    printByWrite(intToString(ntohs(serverTCPAddress.sin_port)));
+                    printByWrite("\n");
+                    if (connect(myTCPSocket, (struct sockaddr*)&serverTCPAddress, sizeof(serverTCPAddress)) == -1) {
+                            perror("connect:");
+                        } else {
+                            printByWrite("connected to server\n");
+                        }
+                    socklen_t myTCPGameAddressLen = sizeof(myTCPGameAddress);
+                    getsockname(myTCPGameSocket, (struct sockaddr*)&myTCPGameAddress, &myTCPGameAddressLen);
+                    printByWrite("Game Port Number: ");
+                    printByWrite(intToString(ntohs(peerAddress.sin_port)));
+                    printByWrite("\n");
+                    myTCPGamePort = ntohs(myTCPGameAddress.sin_port);
+                    packMessage(SEND_USERNAME, username, message);
+                    send(myTCPSocket, message, MAXBUFLEN, 0);
+                    packMessageByLength(SEND_PORT, (char*)&myTCPGamePort, sizeof(int), message);            
+                    send(myTCPSocket, message, MAXBUFLEN, 0);
+                    loggedIn = true;
+                }
+                printByWrite("Server is online. You can:\n");
+                printByWrite("1: Request server to match a random opponent.\n");
+                printByWrite("2: Request server to match a certain opponent with username.\n");
+                printByWrite("3: Find a random opponent.\n");
+                printByWrite("4: Find a certain opponent with username.\n");
+                printByWrite("Enter mode number: ");
+                mode = getIntInput();
+            }
+        }
+        if (mode == 1) {
+            if (myState == IDLE) {
+                packMessageByLength(REQUEST_RANDOM_RIVAL, (char*)&myTCPGamePort, sizeof(int), message);
+                send(myTCPSocket, message, MAXBUFLEN, 0);
+                bzero(buf, MAXBUFLEN);
+                recv(myTCPSocket, buf, MAXBUFLEN, 0);
+                Message serverResponse = unpackMessage(buf);
+                myState = serverResponse.type;
+                
+                if (serverResponse.type == SEND_HOST_PORT) {
+                    peerAddress.sin_addr.s_addr = INADDR_ANY;
+                    peerAddress.sin_port = htons(*(int*)serverResponse.content);
+                    peerAddress.sin_family = AF_INET;
+                    printByWrite("Peer Port Number: ");
+                    printByWrite(intToString(ntohs(peerAddress.sin_port)));
+                    printByWrite("\n");
+                }
+            }
+            int result;
+            if (myState == WAIT_FOR_RIVAL) {
+                printByWrite("Waiting for rival.\n");
+                int opponent = accept(myTCPGameSocket, NULL, NULL);
+                result = play(opponent, HOST, "map");
+                myState = DONE;
+            }
+
+            
+            if (myState == SEND_HOST_PORT) {
+                printByWrite("Waiting to connect to host rival...\n");
+                int connection = connect(gamePlaySocket, (struct sockaddr*)&peerAddress, sizeof(peerAddress));
+                if(connection != -1) printByWrite("Connected to host rival.\n");
+                result = play(gamePlaySocket, GUEST, "map");
+                close(myTCPGameSocket);
+                myState = DONE;
+            }
+            
+            if (myState == DONE && result == WON) {
+                // Send result to server.
+                packMessage(SUBMIT_RESULT, NULL, message);
+                send(myTCPSocket, message, MAXBUFLEN, 0);
+                close(myTCPSocket);
+                myState = IDLE;
+            }
+            
+            if (myState == DONE) {
+                myState = IDLE;
+            }
+            
+            if (result == LOST) {
+                myState = IDLE;
+            }
+            mode = 0;
+        }
+        if (mode == 2) {
+            if (myState == IDLE) {
+                char rivalUsername[MAXBUFLEN];
+                printByWrite("Please enter opponent's username: ");
+                bytesReceived = read(STDIN_FILENO, rivalUsername, sizeof(rivalUsername));
+                rivalUsername[bytesReceived - 1] = '\0';
+                packMessage(REQUEST_SPECIFIC_RIVAL, rivalUsername, message);
+                send(myTCPSocket, message, MAXBUFLEN, 0);
+                bzero(buf, MAXBUFLEN);
+                recv(myTCPSocket, buf, MAXBUFLEN, 0);
+                Message serverResponse = unpackMessage(buf);
+                if (serverResponse.type == SEND_HOST_PORT) {
+                    peerAddress.sin_addr.s_addr = INADDR_ANY;
+                    peerAddress.sin_port = htons(*(int*)serverResponse.content);
+                    peerAddress.sin_family = AF_INET;
+                    printByWrite("Peer Port Number: ");
+                    printByWrite(intToString(ntohs(peerAddress.sin_port)));
+                    printByWrite("\n");
+                    myState = SEND_HOST_PORT;
+                    mode = 1;
+                    continue;
+                }
+                
+                if (serverResponse.type == RIVAL_OFFLINE) {
+                    myState = WAIT_FOR_RIVAL;
+                    mode = 1;
+                    continue;
+                }
+                mode = 0;
+            }
+        }  
     }
-    host_addr = *(struct sockaddr_in*) buf;
-    printf("listener: waiting to connect to server...\n");
-
-    my_tcp_addr.sin_family = AF_INET;     // host byte order
-    my_tcp_addr.sin_port = htons(my_tcp_port); // short, network byte order
-    my_tcp_addr.sin_addr.s_addr = INADDR_ANY;
-    bind(tcp_socket, (struct sockaddr *) &my_tcp_addr, sizeof my_tcp_addr);
-
-    int c = connect(tcp_socket, (struct sockaddr *) &host_addr, sizeof host_addr);
-    printf("CONNECTED TO HOST!!!!!!!!! %d\n", c);
-    printf("listener: packet is %d bytes long\n", numbytes);
-    buf[numbytes] = '\0';
-
-    close(udp_listen_socket);
-    close(tcp_socket);
-
+    close(myUDPListenSocket);
     return 0;
 }
