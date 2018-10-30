@@ -2,20 +2,39 @@
 
 int main(int argc, char *argv[])
 {
-    int myUDPListenPort = atoi(argv[2]);
+    fd_set socketsToReadFDSet, masterFDSet;
+    int myUDPListenPort = atoi(argv[1]);
+    int clientsUDPListenPort = atoi(argv[2]);
     int myTCPGamePort;
     int myState = IDLE;
-    // char* username = argv[1];
-    int myUDPListenSocket, myTCPSocket, myTCPGameSocket, gamePlaySocket;
-    struct sockaddr_in serverTCPAddress, myTCPAddress, myUDPListenAddress, myTCPGameAddress, gamePlayAddress;
-    int bytesReceived;
+    int myUDPListenSocket, myTCPSocket, myTCPGameSocket, gamePlaySocket, myUDPBroadcastSocket, myClientUDPListenSocket;
+    struct sockaddr_in serverTCPAddress, myTCPAddress, myUDPListenAddress, myTCPGameAddress, gamePlayAddress, clientsUDPListenAddress;
+    int bytesReceived, bytesSent;
     struct sockaddr_storage theirAddr;
     char buf[MAXBUFLEN];
     char message[MAXBUFLEN];
     socklen_t addrLen;
     bool serverIsUp = true;
     bool loggedIn = false;
+    int result;
+    int fdMax;
+    int broadcast = 1;
+    clock_t sysTime = clock();
     gamePlaySocket = socket(AF_INET, SOCK_STREAM, 0);
+
+    if ((myUDPBroadcastSocket = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
+        perror("socket");
+        exit(1);
+    }
+    if (setsockopt(myUDPBroadcastSocket, SOL_SOCKET, SO_BROADCAST, &broadcast,
+        sizeof broadcast) == -1) {
+        perror("setsockopt (SO_BROADCAST)");
+        exit(1);
+    }
+    clientsUDPListenAddress.sin_family = AF_INET;
+    clientsUDPListenAddress.sin_port = htons(clientsUDPListenPort);
+    clientsUDPListenAddress.sin_addr.s_addr = inet_addr(BROADCAST_GROUP_IP);
+    memset(clientsUDPListenAddress.sin_zero, '\0', sizeof clientsUDPListenAddress.sin_zero);
 
     myUDPListenSocket = socket(AF_INET, SOCK_DGRAM, 0);
     myUDPListenAddress.sin_family = AF_INET;
@@ -42,6 +61,23 @@ int main(int argc, char *argv[])
         write(STDERR_FILENO, err, sizeof(err)-1);
         exit(EXIT_FAILURE);
     }
+    //
+    myClientUDPListenSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    clientsUDPListenAddress.sin_family = AF_INET;
+    clientsUDPListenAddress.sin_port = htons(clientsUDPListenPort);
+    clientsUDPListenAddress.sin_addr.s_addr = htonl(INADDR_ANY);
+    setsockopt(myClientUDPListenSocket, SOL_SOCKET, SO_REUSEPORT, &reuseport, sizeof(reuseport));
+    setsockopt(myClientUDPListenSocket, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
+    if (bind(myClientUDPListenSocket, (struct sockaddr *) &clientsUDPListenAddress, sizeof clientsUDPListenAddress) == -1) {
+        close(myClientUDPListenSocket);
+        perror("listener: bind");
+    }
+    if (setsockopt(myClientUDPListenSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*) &mreq, sizeof(mreq)) < 0){
+        const char err[] ="setsockopt: mreq\n" ;
+        write(STDERR_FILENO, err, sizeof(err)-1);
+        exit(EXIT_FAILURE);
+    }
+    //
     char username[MAXBUFLEN];
     printByWrite("Please enter your username: ");
     bytesReceived = read(STDIN_FILENO, username, sizeof(username));
@@ -126,7 +162,6 @@ int main(int argc, char *argv[])
                     printByWrite("\n");
                 }
             }
-            int result;
             if (myState == WAIT_FOR_RIVAL) {
                 printByWrite("Waiting for rival.\n");
                 int opponent = accept(myTCPGameSocket, NULL, NULL);
@@ -140,15 +175,14 @@ int main(int argc, char *argv[])
                 int connection = connect(gamePlaySocket, (struct sockaddr*)&peerAddress, sizeof(peerAddress));
                 if(connection != -1) printByWrite("Connected to host rival.\n");
                 result = play(gamePlaySocket, GUEST, "map");
-                close(myTCPGameSocket);
+                // close(myTCPGameSocket);
                 myState = DONE;
             }
             
             if (myState == DONE && result == WON) {
-                // Send result to server.
                 packMessage(SUBMIT_RESULT, NULL, message);
                 send(myTCPSocket, message, MAXBUFLEN, 0);
-                close(myTCPSocket);
+                // close(myTCPSocket);
                 myState = IDLE;
             }
             
@@ -191,7 +225,182 @@ int main(int argc, char *argv[])
                 }
                 mode = 0;
             }
-        }  
+        }
+        if (mode == 3) {
+            socklen_t myTCPGameAddressLen = sizeof(myTCPGameAddress);
+            getsockname(myTCPGameSocket, (struct sockaddr*)&myTCPGameAddress, &myTCPGameAddressLen);
+            int host = 0;
+            myTCPGamePort = ntohs(myTCPGameAddress.sin_port);            
+            struct sockaddr_in rivalAddress;
+            memset((char*)&rivalAddress, 0, sizeof(rivalAddress));
+            FD_ZERO(&socketsToReadFDSet);
+            FD_ZERO(&masterFDSet);
+            FD_SET(myTCPGameSocket, &masterFDSet);
+            FD_SET(myClientUDPListenSocket, &masterFDSet);
+            int availability = 0;
+            if (myTCPGameSocket > myClientUDPListenSocket) {
+                fdMax = myTCPGameSocket;
+            } else {
+                fdMax = myClientUDPListenSocket;
+            }
+            int broke = 0;
+            while (!broke) {
+                if ((double)(clock() - sysTime) / CLOCKS_PER_SEC > 1)
+                {
+                    bytesSent = sendHeartBeat(myUDPBroadcastSocket, &myTCPGameAddress, &clientsUDPListenAddress);
+                    printByWrite("Sent heartbeat.\n");
+                    sysTime = clock();
+                }
+                socketsToReadFDSet = masterFDSet;
+                struct timeval timeout;
+                timeout.tv_usec = timeout.tv_sec = 0;
+                if (select(fdMax+1, &socketsToReadFDSet, NULL, NULL, &timeout) == -1) {
+                    perror("select");
+                }
+                for(int i = 0; i <= fdMax; i++) {
+                    if (FD_ISSET(i, &socketsToReadFDSet) && i > 2) {
+                        if (i == myTCPGameSocket) {
+                            int new = accept(myTCPGameSocket, NULL, NULL);
+                            result = play(new, HOST, "map");    
+                            mode = 0;
+                            myState = IDLE;
+                            FD_SET(new, &masterFDSet);
+                            if (new > fdMax) {    // keep track of the max
+                                fdMax = new;
+                            }
+                            broke = 1;
+                            break;
+                        }
+                        if (i == myClientUDPListenSocket) {
+                            bytesReceived = recvfrom(myClientUDPListenSocket, buf, MAXBUFLEN, 0, NULL, NULL);
+                            buf[bytesReceived] = '\0';
+                            char temp[MAXBUFLEN];
+                            strcpy(temp, buf);
+                            
+                            if (strcmp(strtok(temp, " "), "Username") == 0) {
+                                strcpy(temp, buf);
+                                if (strcmp(strtok(temp, " "), username) == 0) {
+                                    availability = 1;
+                                    rivalAddress.sin_port = htons(atoi(temp));
+                                    rivalAddress.sin_addr.s_addr = INADDR_ANY;
+                                    rivalAddress.sin_family = AF_INET;
+                                } else {
+                                    availability = 0;
+                                }
+                            } else {
+                                rivalAddress = *(struct sockaddr_in*)buf;
+                                if (bytesReceived > 0 && ntohs(rivalAddress.sin_port) != myTCPGamePort) {
+                                    availability = 1;
+                                } else {
+                                    availability = 0;
+                                }
+                            }
+                            if (availability == 1) {
+                                int c = connect(gamePlaySocket, (struct sockaddr*)&rivalAddress, sizeof(rivalAddress));
+                                if(c != -1) printByWrite("Connected to host rival.\n");
+                                result = play(gamePlaySocket, GUEST, "map");
+                                mode = 0;
+                                myState = IDLE;
+                                broke = 1;
+                                myState = IDLE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (mode == 4) {
+            char rivalUsername[MAXBUFLEN];
+            printByWrite("Please enter opponent's username: ");
+            bytesReceived = read(STDIN_FILENO, rivalUsername, sizeof(rivalUsername));
+            rivalUsername[bytesReceived - 1] = '\0';
+            socklen_t myTCPGameAddressLen = sizeof(myTCPGameAddress);
+            getsockname(myTCPGameSocket, (struct sockaddr*)&myTCPGameAddress, &myTCPGameAddressLen);
+            int host = 0;
+            myTCPGamePort = ntohs(myTCPGameAddress.sin_port);            
+            struct sockaddr_in rivalAddress;
+            memset((char*)&rivalAddress, 0, sizeof(rivalAddress));
+            FD_ZERO(&socketsToReadFDSet);
+            FD_ZERO(&masterFDSet);
+            FD_SET(myTCPGameSocket, &masterFDSet);
+            FD_SET(myClientUDPListenSocket, &masterFDSet);
+            int availability = 0;
+            if (myTCPGameSocket > myClientUDPListenSocket) {
+                fdMax = myTCPGameSocket;
+            } else {
+                fdMax = myClientUDPListenSocket;
+            }
+            int broke = 0;
+            while (!broke) {
+                if ((double)(clock() - sysTime) / CLOCKS_PER_SEC > 1)
+                {
+                    bzero(message, MAXBUFLEN);
+                    strcat(message, "Username ");
+                    strcat(message, rivalUsername);
+                    strcat(message, " ");
+                    strcat(message, intToString(myTCPGamePort));
+                    sendto(myUDPBroadcastSocket , message, MAXBUFLEN, 0, (struct sockaddr*)&clientsUDPListenAddress, sizeof clientsUDPListenAddress);
+                    printByWrite("Sent heartbeat.\n");
+                    sysTime = clock();
+                }
+                socketsToReadFDSet = masterFDSet;
+                struct timeval timeout;
+                timeout.tv_usec = timeout.tv_sec = 0;
+                if (select(fdMax+1, &socketsToReadFDSet, NULL, NULL, &timeout) == -1) {
+                    perror("select");
+                }
+                for(int i = 0; i <= fdMax; i++) {
+                    if (FD_ISSET(i, &socketsToReadFDSet) && i > 2) {
+                        if (i == myTCPGameSocket) {
+                            int new = accept(myTCPGameSocket, NULL, NULL);
+                            result = play(new, HOST, "map");    
+                            mode = 0;
+                            myState = IDLE;
+                            FD_SET(new, &masterFDSet);
+                            if (new > fdMax) {    // keep track of the max
+                                fdMax = new;
+                            }
+                            broke = 1;
+                            break;
+                        }
+                        if (i == myClientUDPListenSocket) {
+                            bytesReceived = recvfrom(myClientUDPListenSocket, buf, MAXBUFLEN, 0, NULL, NULL);
+                            buf[bytesReceived] = '\0';
+                            char temp[MAXBUFLEN];
+                            strcpy(temp, buf);
+                            
+                            if (strcmp(strtok(temp, " "), "Username") == 0) {
+                                strcpy(temp, buf);
+                                if (strcmp(strtok(temp, " "), username) == 0) {
+                                    availability = 1;
+                                    rivalAddress.sin_port = htons(atoi(temp));
+                                    rivalAddress.sin_addr.s_addr = INADDR_ANY;
+                                    rivalAddress.sin_family = AF_INET;
+                                } else {
+                                    availability = 0;
+                                }
+                            } else {
+                                rivalAddress = *(struct sockaddr_in*)buf;
+                                if (bytesReceived > 0 && ntohs(rivalAddress.sin_port) != myTCPGamePort) {
+                                    availability = 1;
+                                } else {
+                                    availability = 0;
+                                }
+                            }
+                            if (availability == 1) {
+                                int c = connect(gamePlaySocket, (struct sockaddr*)&rivalAddress, sizeof(rivalAddress));
+                                if(c != -1) printByWrite("Connected to host rival.\n");
+                                result = play(gamePlaySocket, GUEST, "map");
+                                mode = 0;
+                                myState = IDLE;
+                                broke = 1;
+                                myState = IDLE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     close(myUDPListenSocket);
     return 0;

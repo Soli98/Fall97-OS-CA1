@@ -4,12 +4,10 @@ int main(int argc, char *argv[])
 {
     int clientsUDPListenPort = atoi(argv[1]);
     int clientsUDPBroadcastPort = atoi(argv[2]);
-
     fd_set socketsToReadFDSet, masterFDSet;
     int myUDPSocket, myTCPSocket;
     struct sockaddr_in clientsUDPAddress, myTCPAddress, clientTCPAddress;
     socklen_t clientsUDPAddressLen = sizeof(clientTCPAddress);
-
     int bytesSent, bytesReceived, broadcast = 1, fdMax;
     clock_t sysTime = clock();
     struct PendingRequest pendingRequests[MAX_CLIENTS];
@@ -17,13 +15,9 @@ int main(int argc, char *argv[])
     struct Match** matches;
     int numOfMatches = 0;
     matches = (Match**)malloc(numOfMatches*sizeof(Match*));
-
     char buf[MAXBUFLEN];
     char message[MAXBUFLEN];
 
-
-    // Setting up the TCP listener socket
-    // TODO: functionalize
     if ((myTCPSocket = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         perror("socket");
         exit(1);
@@ -86,9 +80,9 @@ int main(int argc, char *argv[])
                 } 
                 break;
             }
-            if (FD_ISSET(i, &socketsToReadFDSet) && i > 2) {                // New connection request
+            if (FD_ISSET(i, &socketsToReadFDSet) && i > 2) {
+                // New connection request
                 if(i == myTCPSocket) {
-                    // TODO: Handle new connections
                     int new = accept(myTCPSocket, (struct sockaddr*)&clientTCPAddress, &clientsUDPAddressLen);
                     FD_SET(new, &masterFDSet);
                     if (new > fdMax) {    // keep track of the max
@@ -127,7 +121,6 @@ int main(int argc, char *argv[])
                         close(i); // bye!
                         FD_CLR(i, &masterFDSet); // remove from master set
                     } else {
-                        // TODO: The main block to handle all the logic
                         Message message = unpackMessage(buf);
                         printByWrite("Type: ");
                         printByWrite(intToString(message.type));
@@ -222,7 +215,6 @@ int main(int argc, char *argv[])
                                     }
                                 }
                                 else {
-                                    // TODO: send response
                                     printByWrite("No rival found with the provided username.\n");
                                 }
                                 break;
